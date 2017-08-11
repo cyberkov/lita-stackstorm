@@ -126,6 +126,11 @@ module Lita
           end
         end
 
+        if found.empty?
+          msg.reply "I couldn't find a command for '#{command}'. sorry."
+          return
+        end
+
         jobject = JSON.parse(redis.get(found))
         payload = {
           name: jobject['object']['name'],
