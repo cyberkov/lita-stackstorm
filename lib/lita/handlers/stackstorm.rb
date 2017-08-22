@@ -13,7 +13,6 @@ end
 module Lita
   module Handlers
     class Stackstorm < Handler
-      # insert handler code here
 
       config :url, required: true
       config :username, required: true
@@ -21,8 +20,11 @@ module Lita
       config :auth_port, required: false, default: 9100
       config :execution_port, required: false, default: 9101
       config :emoji_icon, required: false, default: ':panda:'
+      config :default_room, required: true, default: 'chatops'
 
       on :connected, :stream_listen
+      on :stackstorm_stream_disconnected, :stream_listen
+      on :connected, :stream_watchdog
 
       class << self
         attr_accessor :token, :expires
@@ -35,11 +37,11 @@ module Lita
 
       route /^st2 login$/, :login, command: false, help: { 'st2 login' => 'login with st2-api' }
       route /^st2 (ls|aliases|list)$/, :list, command: false, help: { 'st2 list' => 'list available st2 chatops commands' }
-      route /^st2 connect$/, :stream_listen, command: false, help: { 'st2 connect' => 'connect to eventstream' }
+      route /^st2 connect$/, :stream_listen, command: true, help: { 'st2 connect' => 'connect to eventstream' }
 
       route /^!(.*)$/, :call_alias, command: false, help: {}
 
-      def direct_post(channel, message, user)
+      def direct_post(channel, message, user, whisper = false)
         case robot.config.robot.adapter
         when :slack
           payload = {
@@ -61,30 +63,51 @@ module Lita
       def stream_listen(_payload)
         authenticate if expired
         uri = URI("#{url_builder}/stream")
-        log.debug "ST2 connecting"
-        Thread.new do
-          Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
-            request = Net::HTTP::Get.new uri
-            request['X-Auth-Token'] = headers['X-Auth-Token']
-            request['Content-Type'] = 'application/x-yaml'
-            http.request request do |response|
-              io = StringIO.new
-              log.debug "ST2 connected"
-              response.read_body do |chunk|
-                c = chunk.strip
-                unless c.empty?
-                  io.write chunk
-                  event = YAML.safe_load(io.string)
-                  if event['event'] =~ /st2\.announcement/
-                    direct_post(event['data']['payload']['channel'],
-                                event['data']['payload']['message'],
-                                event['data']['payload']['user'])
+        log.info "ST2 connecting to stream" if @stream
+        begin
+          @stream ||= Thread.new do
+            Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') do |http|
+              request = Net::HTTP::Get.new uri
+              request['X-Auth-Token'] = headers['X-Auth-Token']
+              request['Content-Type'] = 'application/x-yaml'
+              request['Transfer-Encoding'] = 'chunked'
+              http.request request do |response|
+                io = StringIO.new
+                log.info 'ST2 connected to stream'
+                response.read_body do |chunk|
+                  c = chunk.strip
+                  unless c.empty?
+                    io.write chunk
+                    begin
+                      event = YAML.safe_load(io.string)
+                      log.debug event
+                      if event['event'] =~ /st2\.announcement/
+                        direct_post(event['data']['payload']['channel'],
+                                    event['data']['payload']['message'],
+                                    event['data']['payload']['user'],
+                                    event['data']['payload']['whisper'])
+                        io.reopen('')
+                      end
+                    rescue Psych::SyntaxError
+                      log.debug 'chunksize exceeded.'
+                    end
                   end
-                  io.reopen('')
                 end
               end
             end
           end
+          @stream.abort_on_exception = true
+        rescue Net::ReadTimeout
+          log.info 'ST2 Read timeout. triggering reconnect.'
+          robot.trigger(:stackstorm_stream_disconnected)
+        end
+        @stream = nil unless @stream.alive?
+        (_payload.reply "Stream is currently #{@stream.alive? ? 'alive' : 'dead'}" if _payload.command?) if _payload.respond_to?(:command?)
+      end
+
+      def stream_watchdog(payload)
+        every(60) do
+          stream_listen(payload)
         end
       end
 
@@ -137,9 +160,10 @@ module Lita
           format: jobject['format'],
           command: command,
           user: msg.user.name,
-          source_channel: 'chatops',
+          source_channel: (msg.message.source.room || config.default_room),
           notification_channel: 'lita'
         }
+        log.debug "Sending '#{payload}'"
         s = make_post_request('/aliasexecution', payload)
         j = JSON.parse(s.body)
         if s.success?
