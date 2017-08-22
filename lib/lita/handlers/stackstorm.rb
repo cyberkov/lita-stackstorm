@@ -70,8 +70,8 @@ module Lita
             EM.run do
               stream_headers = headers
               stream_headers['Content-Type'] = 'application/x-yaml'
-              http = EventMachine::HttpRequest.new(uri, inactivity_timeout: 0).get head: stream_headers, keepalive: true
-              log.info 'Connected to Stackstorm.'
+              http = EventMachine::HttpRequest.new(uri, inactivity_timeout: 0, ssl: { :verify_peer => false }).get head: stream_headers, keepalive: true
+              log.info "#{ Thread.current } Connected to Stackstorm."
               io = StringIO.new
               http.stream do |chunk|
                 c = chunk.strip
@@ -85,10 +85,10 @@ module Lita
                                   event['data']['payload']['message'],
                                   event['data']['payload']['user'],
                                   event['data']['payload']['whisper'])
-                      io.reopen('')
                     end
+                    io.reopen('')
                   rescue Psych::SyntaxError
-                    log.debug 'st2: chunksize exceeded. buffering'
+                    log.debug "#{Thread.current} st2: chunksize exceeded. buffering"
                   end
                 end
               end
@@ -123,7 +123,7 @@ module Lita
       end
 
       def authenticate
-        resp = http.post("#{auth_builder}/tokens") do |req|
+        resp = http(:ssl => {:verify => false}).post("#{auth_builder}/tokens", ) do |req|
           req.body = {}
           req.headers['Authorization'] = http.set_authorization_header(:basic_auth, config.username, config.password)
         end
@@ -231,7 +231,7 @@ module Lita
       end
 
       def make_request(path, body)
-        resp = http.get("#{url_builder}#{path}") do |req|
+        resp = http(ssl: { verify: false }).get("#{url_builder}#{path}") do |req|
           req.headers = headers
           req.body = body.to_json unless body.empty?
         end
@@ -239,7 +239,7 @@ module Lita
       end
 
       def make_post_request(path, body)
-        resp = http.post("#{url_builder}#{path}") do |req|
+        resp = http(ssl: { verify: false }).post("#{url_builder}#{path}") do |req|
           req.body = {}
           req.headers = headers
           req.body = body.to_json
