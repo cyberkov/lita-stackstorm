@@ -3,6 +3,7 @@ require 'net/http'
 require 'yaml'
 require 'pry'
 require 'em-http'
+require 'lita/handlers/event_loop'
 
 class Array
   def swap!(a, b)
@@ -14,7 +15,6 @@ end
 module Lita
   module Handlers
     class Stackstorm < Handler
-
       config :url, required: true
       config :username, required: true
       config :password, required: true
@@ -24,11 +24,22 @@ module Lita
       config :default_room, required: true, default: 'chatops'
 
       on :connected, :stream_listen
-      on :st2_command_called, :stream_listen
-      on :connected, :stream_watchdog
+
+      # Ready state
+      # The connection has not yet been established, or it was closed and the user agent is reconnecting.
+      CONNECTING = 0
+      # The user agent has an open connection and is dispatching events as it receives them.
+      OPEN       = 1
+      # The connection is not open, and the user agent is not trying to reconnect. Either there was a fatal error or the close() method was invoked.
+      CLOSED     = 2
 
       class << self
         attr_accessor :token, :expires
+        attr_reader :stream
+        attr_reader :ready_state
+        attr_reader :retry
+
+        @retry = 3
       end
 
       def self.config(_config)
@@ -42,9 +53,9 @@ module Lita
 
       route /^!(.*)$/, :call_alias, command: false, help: {}
 
-      def direct_post(channel, message, user, whisper = false)
-        #case robot.config.robot.adapter
-        #when :slack
+      def direct_post(channel, message, user, _whisper = false)
+        # case robot.config.robot.adapter
+        # when :slack
         #  payload = {
         #    action: 'slack.chat.postMessage',
         #    parameters: {
@@ -55,55 +66,96 @@ module Lita
         #    }
         #  }
         #  make_post_request('/executions', payload)
-        #else
-          target = Lita::Source.new(user: Lita::User.fuzzy_find(user), room: Lita::Room.fuzzy_find(channel))
-          robot.send_message(target, message)
-        #end
+        # else
+        target = Lita::Source.new(user: Lita::User.fuzzy_find(user), room: Lita::Room.fuzzy_find(channel))
+        robot.send_message(target, message)
+        # end
+      end
+
+      def receive_message(event)
+        log.debug "caught #{event}"
+        data = YAML.safe_load(event.data)
+        log.info data
       end
 
       def stream_listen(_payload)
+        @loop ||= EventLoop.run do
+          @ready_state = CONNECTING
+          listen
+        end
+        (_payload.reply "Stream is currently #{@ready_state}" if _payload.command?) if _payload.respond_to?(:command?)
+      end
+
+      def listen
+        log.info 'ST2 connecting to stream'
         authenticate if expired
-        uri = URI("#{url_builder}/stream")
-        log.info "ST2 connecting to stream" if @stream
-        begin
-          @stream ||= Thread.new do
-            EM.run do
-              stream_headers = headers
-              stream_headers['Content-Type'] = 'application/x-yaml'
-              http = EventMachine::HttpRequest.new(uri, inactivity_timeout: 0, ssl: { :verify_peer => false }).get head: stream_headers, keepalive: true
-              log.info "#{ Thread.current } Connected to Stackstorm."
-              io = StringIO.new
-              http.stream do |chunk|
-                c = chunk.strip
-                unless c.empty?
-                  io.write chunk
-                  begin
-                    event = YAML.safe_load(io.string)
-                    if event['event'] =~ /st2\.announcement/
-                      log.debug "st2 event: #{event}"
-                      direct_post(event['data']['payload']['channel'],
-                                  event['data']['payload']['message'],
-                                  event['data']['payload']['user'],
-                                  event['data']['payload']['whisper'])
-                    end
-                    io.reopen('')
-                  rescue Psych::SyntaxError
-                    log.debug "#{Thread.current} st2: chunksize exceeded. buffering"
-                  end
-                end
-              end
-            end
-            @stream.abort_on_exception = true
+        uri = "#{url_builder}/stream"
+        stream_headers = headers
+        stream_headers['Content-Type'] = 'application/x-yaml'
+        stream_headers['Cache-Control'] = 'no-cache'
+        stream_headers['Accept'] = 'text/event-stream'
+        log.debug stream_headers
+        @conn = EventMachine::HttpRequest.new(uri, inactivity_timeout: 0, ssl: { verify_peer: false })
+        @req = @conn.get head: stream_headers, keepalive: true
+        @req.errback(&method(:handle_reconnect))
+        @req.callback(&method(:handle_reconnect))
+        buffer = ''
+
+        @req.stream do |chunk|
+          buffer += chunk
+          while index = buffer.index(/\r\n\r\n|\n\n/)
+            stream = buffer.slice!(0..index)
+            handle_stream(stream)
           end
-          @stream = nil unless @stream.alive?
-          (_payload.reply "Stream is currently #{@stream.alive? ? 'alive' : 'dead'}" if _payload.command?) if _payload.respond_to?(:command?)
         end
       end
 
-      def stream_watchdog(payload)
-        every(60) do
-          stream_listen(payload)
+      def handle_reconnect(*_args)
+        return if @ready_state == CLOSED
+        @ready_state = CONNECTING
+        log.error 'Connection lost. Reconnecting.'
+        close
+        EM.add_timer(@retry) do
+          listen
         end
+      end
+
+      def handle_stream(stream)
+        data = ''
+        name = nil
+        stream.split(/\r?\n/).each do |part|
+          /^data:(.+)$/.match(part) do |m|
+            data += m[1].strip
+            data += "\n"
+          end
+          /^id:(.+)$/.match(part) do |m|
+            @last_event_id = m[1].strip
+          end
+          /^event:(.+)$/.match(part) do |m|
+            name = m[1].strip
+          end
+          /^retry:(.+)$/.match(part) do |m|
+            @retry = m[1].to_i if m[1].strip! =~ /^[0-9]+$/
+          end
+        end
+        return if data.empty?
+        data.chomp!
+
+        event = YAML.safe_load(data)
+        if name =~ /st2\.announcement/
+          log.debug "st2 event: #{name}"
+          direct_post(event['payload']['channel'],
+                      event['payload']['message'],
+                      event['payload']['user'],
+                      event['payload']['whisper'])
+        else
+          log.debug "Ignoring event: '#{name}'"
+        end
+      end
+
+      def close
+        @ready_state = CLOSED
+        @conn.close('requested') if @conn
       end
 
       def auth_builder
@@ -123,7 +175,7 @@ module Lita
       end
 
       def authenticate
-        resp = http(:ssl => {:verify => false}).post("#{auth_builder}/tokens", ) do |req|
+        resp = http(ssl: { verify: false }).post("#{auth_builder}/tokens") do |req|
           req.body = {}
           req.headers['Authorization'] = http.set_authorization_header(:basic_auth, config.username, config.password)
         end
