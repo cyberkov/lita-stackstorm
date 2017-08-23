@@ -1,9 +1,11 @@
 require 'eventmachine'
+require 'singleton'
 
 module Lita
   module Handlers
     class Stackstorm < Handler
       class EventLoop
+        include Singleton
         class << self
           def defer
             EM.defer { yield }
