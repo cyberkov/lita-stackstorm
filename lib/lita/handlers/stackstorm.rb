@@ -70,19 +70,19 @@ module Lita
         if _payload.respond_to?(:command?)
           if _payload.command?
             if EventLoop.running?
-              _payload.reply "Stream Listener is running."
+              _payload.reply 'Stream Listener is running.'
               return
             else
-              _payload.reply "Stream Listener is NOT running."
+              _payload.reply 'Stream Listener is NOT running.'
             end
           end
         end
 
-        Thread.new {
+        Thread.new do
           EventLoop.run do
             listen
           end
-        }.abort_on_exception=true
+        end.abort_on_exception = true
       end
 
       def listen
@@ -100,7 +100,7 @@ module Lita
           log.debug "new message #{data}"
         end
 
-        @conn.on "st2.announcement__chatops" do |data|
+        @conn.on 'st2.announcement__chatops' do |data|
           log.debug "st2 event: #{data}"
           event = YAML.safe_load(data)
           direct_post(event['payload']['channel'],
@@ -180,18 +180,18 @@ module Lita
           refurl = "#{config.url}/#/history/#{j['execution']['id']}/general"
           replies = [
             "I'll take it from here! Your execution ID for reference is %s",
-            "Got it! Remember %s as your execution ID",
+            'Got it! Remember %s as your execution ID',
             "I'm on it! Your execution ID is %s",
-            "Let me get right on that. Remember %s as your execution ID",
+            'Let me get right on that. Remember %s as your execution ID',
             "Always something with you. :) I'll take care of that. Your ID is %s",
-            "I have it covered. Your execution ID is %s",
-            "Let me start up the machine! Your execution ID is %s",
+            'I have it covered. Your execution ID is %s',
+            'Let me start up the machine! Your execution ID is %s',
             "I'll throw that task in the oven and get cookin'! Your execution ID is %s",
             "Want me to take that off your hand? You got it! Don't forget your execution ID: %s",
-            "River Tam will get it done with her psychic powers. Your execution ID is %s"
+            'River Tam will get it done with her psychic powers. Your execution ID is %s'
           ]
           msg.reply sprintf(replies.sample, refurl)
-          #msg.reply "Got it! Details available at #{config.url}/#/history/#{j['execution']['id']}/general"
+          # msg.reply "Got it! Details available at #{config.url}/#/history/#{j['execution']['id']}/general"
         else
           msg.reply "Execution failed with message: #{j['faultstring']}"
         end
