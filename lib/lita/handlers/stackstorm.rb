@@ -205,7 +205,7 @@ module Lita
           msg.reply 'No Action Aliases Registered'
         else
           j = JSON.parse(s.body)
-          a = ''
+          a = []
           j.take_while { |i| i['enabled'] }.each do |command|
             # convert each representation to a regular expression
             command['formats'].each do |format|
@@ -214,33 +214,33 @@ module Lita
                   format['representation'].each do |rep|
                     f = convert_to_regex(rep)
                     redis.set(f, { format: rep, object: command }.to_json)
-                    a += "#{format['display']} -> #{command['description']}\n"
+                    a << "#{format['display']} -> #{command['description']}"
                   end
                 else
                   f = convert_to_regex(format['display'])
                   redis.set(f, { format: format['display'], object: command }.to_json)
-                  a += "#{format['display']} -> #{command['description']}\n"
+                  a << "#{format['display']} -> #{command['description']}"
                 end
 
               elsif format.is_a? String
                 f = convert_to_regex(format)
                 redis.set(f, { format: format, object: command }.to_json)
-                a += "#{format} -> #{command['description']}\n"
+                a << "#{format} -> #{command['description']}" + " - '#{f}'"
               else
                 next
               end
             end
           end
-          msg.reply a
+          msg.reply a.uniq.sort.join("\n")
         end
       end
 
       def convert_to_regex(format)
         extra_params = '(\\s+(\\S+)\\s*=("([\\s\\S]*?)"|\'([\\s\\S]*?)\'|({[\\s\\S]*?})|(\\S+))\\s*)*'
-        f = format.gsub(/(\s*){{\s*\S+\s*=\s*(?:({.+?}|.+?))\s*}}(\s*)/, '\\s*([\\S]+)?\\s*')
-        f = f.gsub(/\s*{{.+?}}\s*/, '\\s*([\\S]+?)\\s*')
-        f = "^\\s*#{f}#{extra_params}\\s*$"
-        f
+        regex_str = format.gsub(/(\s*){{\s*\S+\s*=\s*(?:({.+?}|.+?))\s*}}(\s*)/, '\\s*($1([\\s\\S]+?)$3)?\\s*')
+        regex_str = regex_str.gsub(/\s*{{.+?}}\s*/, '\\s*([\\s\\S]+?)\\s*')
+        regex = "^\\s*#{regex_str}#{extra_params}\\s*$"
+        regex
       end
 
       def login(msg)
