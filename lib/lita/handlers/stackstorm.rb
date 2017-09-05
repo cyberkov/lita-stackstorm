@@ -2,7 +2,7 @@ require 'json'
 require 'net/http'
 require 'yaml'
 require 'pry'
-require 'em-http'
+require 'ld-em-eventsource'
 require 'lita/handlers/event_loop'
 
 class Array
@@ -73,20 +73,23 @@ module Lita
         # end
       end
 
-      def receive_message(event)
-        log.debug "caught #{event}"
-        data = YAML.safe_load(event.data)
-        log.info data
-      end
-
       def stream_listen(_payload)
-        @loop = Thread.new do
-          EventLoop.run do
-            @ready_state = CONNECTING
-            listen
+        if _payload.respond_to?(:command?)
+          if _payload.command?
+            if EventLoop.running?
+              _payload.reply "Stream Listener is running."
+              return
+            else
+              _payload.reply "Stream Listener is NOT running."
+            end
           end
         end
-        (_payload.reply "Stream is currently #{@ready_state}" if _payload.command?) if _payload.respond_to?(:command?)
+
+        Thread.new {
+          EventLoop.run do
+            listen
+          end
+        }.abort_on_exception=true
       end
 
       def listen
@@ -95,70 +98,33 @@ module Lita
         uri = "#{url_builder}/stream"
         stream_headers = headers
         stream_headers['Content-Type'] = 'application/x-yaml'
-        stream_headers['Cache-Control'] = 'no-cache'
-        stream_headers['Accept'] = 'text/event-stream'
         log.debug stream_headers
-        @conn = EventMachine::HttpRequest.new(uri, inactivity_timeout: 0, ssl: { verify_peer: false })
-        @req = @conn.get head: stream_headers, keepalive: true
-        @req.errback(&method(:handle_reconnect))
-        @req.callback(&method(:handle_reconnect))
-        buffer = ''
+        @conn = EM::EventSource.new(uri, nil, stream_headers)
+        @conn.inactivity_timeout = 60
 
-        @req.stream do |chunk|
-          buffer += chunk
-          while index = buffer.index(/\r\n\r\n|\n\n/)
-            stream = buffer.slice!(0..index)
-            handle_stream(stream)
-          end
+        @conn.message do |data|
+          event = YAML.safe_load(data)
+          log.debug "new message #{data}"
         end
-      end
 
-      def handle_reconnect(*_args)
-        return if @ready_state == CLOSED
-        @ready_state = CONNECTING
-        log.error 'Connection lost. Reconnecting.'
-        close
-        EM.add_timer(@retry) do
-          listen
-        end
-      end
-
-      def handle_stream(stream)
-        data = ''
-        name = nil
-        stream.split(/\r?\n/).each do |part|
-          /^data:(.+)$/.match(part) do |m|
-            data += m[1].strip
-            data += "\n"
-          end
-          /^id:(.+)$/.match(part) do |m|
-            @last_event_id = m[1].strip
-          end
-          /^event:(.+)$/.match(part) do |m|
-            name = m[1].strip
-          end
-          /^retry:(.+)$/.match(part) do |m|
-            @retry = m[1].to_i if m[1].strip! =~ /^[0-9]+$/
-          end
-        end
-        return if data.empty?
-        data.chomp!
-
-        event = YAML.safe_load(data)
-        if name =~ /st2\.announcement/
-          log.debug "st2 event: #{name}"
+        @conn.on "st2.announcement__chatops" do |data|
+          log.debug "st2 event: #{data}"
+          event = YAML.safe_load(data)
           direct_post(event['payload']['channel'],
                       event['payload']['message'],
                       event['payload']['user'],
                       event['payload']['whisper'])
-        else
-          log.debug "Ignoring event: '#{name}'"
         end
-      end
 
-      def close
-        @ready_state = CLOSED
-        @conn.close('requested') if @conn
+        @conn.open do
+          log.info 'ST2 Stream connected.'
+        end
+
+        @conn.error do |error|
+          log.error "error #{error}"
+        end
+
+        @conn.start
       end
 
       def auth_builder
