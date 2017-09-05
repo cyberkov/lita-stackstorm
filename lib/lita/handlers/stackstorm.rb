@@ -22,16 +22,9 @@ module Lita
       config :execution_port, required: false, default: 9101
       config :emoji_icon, required: false, default: ':panda:'
       config :default_room, required: true, default: 'chatops'
+      config :st2_route, required: true, default: 'lita'
 
       on :connected, :stream_listen
-
-      # Ready state
-      # The connection has not yet been established, or it was closed and the user agent is reconnecting.
-      CONNECTING = 0
-      # The user agent has an open connection and is dispatching events as it receives them.
-      OPEN       = 1
-      # The connection is not open, and the user agent is not trying to reconnect. Either there was a fatal error or the close() method was invoked.
-      CLOSED     = 2
 
       class << self
         attr_accessor :token, :expires
@@ -177,14 +170,28 @@ module Lita
           command: command,
           user: msg.user.name,
           source_channel: (msg.message.source.room || config.default_room),
-          notification_channel: 'lita'
+          notification_channel: config.st2_route
         }
         log.debug "Sending '#{payload}'"
         s = make_post_request('/aliasexecution', payload)
         robot.trigger(:st2_command_called)
         j = JSON.parse(s.body)
         if s.success?
-          msg.reply "Got it! Details available at #{config.url}/#/history/#{j['execution']['id']}/general"
+          refurl = "#{config.url}/#/history/#{j['execution']['id']}/general"
+          replies = [
+            "I'll take it from here! Your execution ID for reference is %s",
+            "Got it! Remember %s as your execution ID",
+            "I'm on it! Your execution ID is %s",
+            "Let me get right on that. Remember %s as your execution ID",
+            "Always something with you. :) I'll take care of that. Your ID is %s",
+            "I have it covered. Your execution ID is %s",
+            "Let me start up the machine! Your execution ID is %s",
+            "I'll throw that task in the oven and get cookin'! Your execution ID is %s",
+            "Want me to take that off your hand? You got it! Don't forget your execution ID: %s",
+            "River Tam will get it done with her psychic powers. Your execution ID is %s"
+          ]
+          msg.reply sprintf(replies.sample, refurl)
+          #msg.reply "Got it! Details available at #{config.url}/#/history/#{j['execution']['id']}/general"
         else
           msg.reply "Execution failed with message: #{j['faultstring']}"
         end
