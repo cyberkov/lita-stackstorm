@@ -23,6 +23,7 @@ module Lita
       config :emoji_icon, required: false, default: ':panda:'
       config :default_room, required: true, default: 'chatops'
       config :st2_route, required: true, default: 'lita'
+      config :debug, type: [true, false], default: false
 
       on :connected, :stream_listen
 
@@ -78,11 +79,12 @@ module Lita
           end
         end
 
-        Thread.new do
+        @stream = Thread.new do
           EventLoop.run do
             listen
           end
-        end.abort_on_exception = true
+        end
+        @stream.abort_on_exception = true if config.debug
       end
 
       def listen
@@ -225,7 +227,7 @@ module Lita
               elsif format.is_a? String
                 f = convert_to_regex(format)
                 redis.set(f, { format: format, object: command }.to_json)
-                a << "#{format} -> #{command['description']}" + " - '#{f}'"
+                a << "#{format} -> #{command['description']}"
               else
                 next
               end
