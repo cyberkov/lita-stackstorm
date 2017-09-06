@@ -192,7 +192,12 @@ module Lita
             "Want me to take that off your hand? You got it! Don't forget your execution ID: %s",
             'River Tam will get it done with her psychic powers. Your execution ID is %s'
           ]
-          msg.reply sprintf(replies.sample, refurl)
+          replymsg = if j['message']
+                       "#{j['message']} - #{refurl}"
+                     else
+                       format(replies.sample, refurl)
+                     end
+          msg.reply replymsg
           # msg.reply "Got it! Details available at #{config.url}/#/history/#{j['execution']['id']}/general"
         else
           msg.reply "Execution failed with message: #{j['faultstring']}"
